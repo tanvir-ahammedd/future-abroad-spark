@@ -7,6 +7,9 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import create_all_tables
+from app.services.gemini import GeminiTimeoutError, GeminiParseError, GeminiServiceError, generate_structured_json
+
+
 
 # Configure logging to output traceback to stdout/console
 logging.basicConfig(
@@ -69,6 +72,55 @@ async def global_exception_handler(request: Request, exc: Exception):
         content=error_content
     )
 
+
+@app.exception_handler(GeminiTimeoutError)
+async def gemini_timeout_handler(request: Request, exc: GeminiTimeoutError):
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.error(f"Gemini Timeout for Request {request_id}: {exc}")
+    return JSONResponse(
+        status_code=504,
+        content={
+            "error": True,
+            "message": "The AI service took too long to respond. Please try again.",
+            "status_code": 504,
+            "detail": str(exc),
+            "request_id": request_id
+        }
+    )
+
+
+@app.exception_handler(GeminiParseError)
+async def gemini_parse_handler(request: Request, exc: GeminiParseError):
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.error(f"Gemini Parse Error for Request {request_id}: {exc}\nRaw Text: {exc.raw_text}")
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": True,
+            "message": "The AI service returned an unexpected response format.",
+            "status_code": 502,
+            "detail": str(exc),
+            "request_id": request_id
+        }
+    )
+
+
+@app.exception_handler(GeminiServiceError)
+async def gemini_service_handler(request: Request, exc: GeminiServiceError):
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.error(f"Gemini Service Error for Request {request_id}: {exc}")
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": True,
+            "message": "The AI service is currently unavailable.",
+            "status_code": 502,
+            "detail": str(exc),
+            "request_id": request_id
+        }
+    )
+
+
 # Lifespan Startup Event
 @app.on_event("startup")
 async def startup_event():
@@ -102,3 +154,5 @@ async def test_error():
     and standard error envelope shape.
     """
     raise ValueError("Simulated internal server error.")
+
+
