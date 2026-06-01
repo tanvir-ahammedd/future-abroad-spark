@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = Field(default="gemini-2.5-pro")
     GEMINI_TIMEOUT_SECONDS: int = Field(default=60)
     CACHE_TTL_SECONDS: int = Field(default=86400)
+    CURRENCY_API_BASE_URL: str = Field(default="")
+    CURRENCY_API_KEY: Optional[str] = Field(default=None)
 
     # Allow loading from a local .env file
     model_config = SettingsConfigDict(

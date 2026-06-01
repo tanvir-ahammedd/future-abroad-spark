@@ -161,5 +161,3 @@ async def test_error():
     and standard error envelope shape.
     """
     raise ValueError("Simulated internal server error.")
-
-
