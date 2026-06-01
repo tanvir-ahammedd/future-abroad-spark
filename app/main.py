@@ -9,6 +9,7 @@ from app.config import settings
 from app.database import create_all_tables
 from app.services.gemini import GeminiTimeoutError, GeminiParseError, GeminiServiceError, generate_structured_json
 from app.routers.visa_pages import router as visa_pages_router
+from app.routers.country_pages import router as country_pages_router
 
 
 
@@ -40,6 +41,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(visa_pages_router)
+app.include_router(country_pages_router)
 
 # Middleware to assign unique Request ID to each request
 @app.middleware("http")
