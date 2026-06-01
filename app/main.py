@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import create_all_tables
 from app.services.gemini import GeminiTimeoutError, GeminiParseError, GeminiServiceError, generate_structured_json
+from app.routers.visa_pages import router as visa_pages_router
+
 
 
 
@@ -35,6 +37,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register routers
+app.include_router(visa_pages_router)
 
 # Middleware to assign unique Request ID to each request
 @app.middleware("http")
