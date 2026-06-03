@@ -49,6 +49,10 @@ async def get_visa_details(
     """
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     
+    # Normalize slugs to lowercase before validation
+    country_slug = country_slug.lower()
+    visa_slug = visa_slug.lower()
+    
     # 1. Validation Rules
     validate_slug(country_slug, "country slug")
     validate_slug(visa_slug, "visa slug")
@@ -179,6 +183,7 @@ async def list_country_visas(
     Returns a listing of all major visa programmes available for a specific country.
     """
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    country_slug = country_slug.lower()
     validate_slug(country_slug, "country slug")
     
     cache_key = f"visas_list:{country_slug}"

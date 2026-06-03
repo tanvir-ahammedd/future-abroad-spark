@@ -48,6 +48,9 @@ async def get_country_details(
     """
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     
+    # Normalize slug to lowercase before validation
+    country_slug = country_slug.lower()
+    
     # 1. Validation Rules
     validate_slug(country_slug, "country slug")
     
