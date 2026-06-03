@@ -36,6 +36,7 @@ class ContentCache(Base):
         DateTime(timezone=True),
         nullable=False
     )
+    
 
 # Indexes for fast key lookups and expired TTL cleanups
 Index("ux_content_cache_cache_key", ContentCache.cache_key, unique=True)
