@@ -37,6 +37,8 @@ class ChatMessage(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc)
     )
+    
+    
 
     # Reference back to session parent
     session = relationship(
