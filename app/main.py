@@ -11,6 +11,7 @@ from app.services.gemini import GeminiTimeoutError, GeminiParseError, GeminiServ
 from app.routers.visa_pages import router as visa_pages_router
 from app.routers.country_pages import router as country_pages_router
 from app.routers.visa_finder import router as visa_finder_router
+from app.routers.budget import router as budget_router
 
 
 
@@ -44,6 +45,7 @@ app.add_middleware(
 app.include_router(visa_pages_router)
 app.include_router(country_pages_router)
 app.include_router(visa_finder_router)
+app.include_router(budget_router)
 
 # Middleware to assign unique Request ID to each request
 @app.middleware("http")
