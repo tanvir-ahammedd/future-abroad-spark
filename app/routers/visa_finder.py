@@ -85,8 +85,11 @@ async def visa_finder_chat(
     try:
         parsed_response = json.loads(cleaned_text)
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Gemini response as JSON: {response_text}. Error: {e}")
-        raise HTTPException(status_code=502, detail="The AI service returned an unexpected response format.")
+        logger.warning(f"Failed to parse Gemini response as JSON, wrapping as collecting stage message. Raw: {response_text}")
+        parsed_response = {
+            "stage": "collecting",
+            "message": response_text.strip()
+        }
 
     stage = parsed_response.get("stage")
     if stage not in ["collecting", "results"]:

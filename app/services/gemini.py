@@ -3,8 +3,10 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Generator, List, Dict, Any
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
+import httpx
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 from app.config import settings
 
 logger = logging.getLogger("app.services.gemini")
@@ -25,11 +27,19 @@ class GeminiServiceError(Exception):
     pass
 
 
-def _configure_client() -> None:
-    """Configures the GenAI client with the current environment key."""
-    if not settings.GEMINI_API_KEY:
-        raise GeminiServiceError("GEMINI_API_KEY is not set.")
-    genai.configure(api_key=settings.GEMINI_API_KEY)
+_client = None
+
+def get_genai_client() -> genai.Client:
+    """Lazily initializes and returns the google-genai Client."""
+    global _client
+    if _client is None:
+        if not settings.GEMINI_API_KEY:
+            raise GeminiServiceError("GEMINI_API_KEY is not set.")
+        _client = genai.Client(
+            api_key=settings.GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=settings.GEMINI_TIMEOUT_SECONDS * 1000)
+        )
+    return _client
 
 
 def generate_chat_stream(
@@ -51,43 +61,48 @@ def generate_chat_stream(
     Raises:
         GeminiTimeoutError, GeminiServiceError.
     """
-    _configure_client()
+    client = get_genai_client()
     
-    # 1. Map messages from app format (user, assistant) to Gemini SDK format (user, model)
+    # 1. Map messages from app format (user, assistant) to Gemini SDK format
     contents = []
     for msg in messages:
         role = "model" if msg.get("role") == "assistant" else "user"
-        contents.append({
-            "role": role,
-            "parts": [{"text": msg.get("content", "")}]
-        })
+        contents.append(
+            types.Content(
+                role=role,
+                parts=[types.Part.from_text(text=msg.get("content", ""))]
+            )
+        )
         
     # 2. Configure Google Search Grounding dynamically
     tools = []
+    full_system_prompt = system_prompt
     if enable_search_grounding:
-        try:
-            tools.append(genai.protos.Tool(google_search=genai.protos.Tool.GoogleSearch()))
-        except AttributeError:
-            logger.warning("google_search tool is not supported by this SDK version. Falling back to function search.")
-            tools.append({"google_search": {}})
-
-    # 3. Create GenerativeModel
-    try:
-        model = genai.GenerativeModel(
-            model_name=settings.GEMINI_MODEL,
-            system_instruction=system_prompt,
-            tools=tools if tools else None
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
+        # Append a strict reminder to the system prompt to guarantee JSON output under grounding
+        full_system_prompt = (
+            f"{system_prompt}\n\n"
+            "CRITICAL: You MUST respond ONLY with a valid JSON object matching the required shape. "
+            "Do NOT include any preamble, conversational commentary, or markdown code blocks (```json). "
+            "Your response must start with '{' and end with '}'."
         )
-        
+
+    # 3. Create GenerateContentConfig
+    config = types.GenerateContentConfig(
+        system_instruction=full_system_prompt,
+        tools=tools if tools else None
+    )
+    
+    try:
         # Determine timeout limits
         timeout_seconds = settings.GEMINI_TIMEOUT_SECONDS
         start_time = time.time()
         
-        # 4. Invoke stream (request_options supports timeout inside the underlying client wrapper)
-        response_stream = model.generate_content(
-            contents,
-            stream=True,
-            request_options={"timeout": float(timeout_seconds)}
+        # 4. Invoke stream
+        response_stream = client.models.generate_content_stream(
+            model=settings.GEMINI_MODEL,
+            contents=contents,
+            config=config
         )
         
         # 5. Iterate and yield chunks while validating safety/timeouts
@@ -99,17 +114,17 @@ def generate_chat_stream(
             # Detect Safety Block finish reason
             if chunk.candidates:
                 candidate = chunk.candidates[0]
-                finish_reason = getattr(candidate, "finish_reason", 0)
-                # 2 corresponds to SAFETY block
-                if finish_reason == 2 or str(finish_reason) == "SAFETY":
+                finish_reason = getattr(candidate, "finish_reason", None)
+                # "SAFETY" or 2 corresponds to SAFETY block
+                if finish_reason == "SAFETY" or finish_reason == 2:
                     raise GeminiServiceError("The response was blocked by the AI service safety filters.")
                     
             if chunk.text:
                 yield chunk.text
                 
-    except google_exceptions.DeadlineExceeded as e:
+    except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
         raise GeminiTimeoutError(f"AI service connection timed out: {e}")
-    except (google_exceptions.GoogleAPICallError, google_exceptions.InvalidArgument, Exception) as e:
+    except (APIError, Exception) as e:
         err_msg = str(e)
         if "quota" in err_msg.lower() or "429" in err_msg or "resource_exhausted" in err_msg.lower() or "limit" in err_msg.lower():
             logger.warning(f"Quota limit reached in chat stream ({err_msg}). Activating robust mock fallback...")
@@ -155,15 +170,12 @@ def generate_structured_json(
     Raises:
         GeminiTimeoutError, GeminiParseError, GeminiServiceError.
     """
-    _configure_client()
+    client = get_genai_client()
     
     # 1. Configure Google Search Grounding dynamically
     tools = []
     if enable_search_grounding:
-        try:
-            tools.append(genai.protos.Tool(google_search=genai.protos.Tool.GoogleSearch()))
-        except AttributeError:
-            tools.append({"google_search": {}})
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
 
     # 2. Append JSON instructions to system prompt to guarantee compliance
     full_system_prompt = (
@@ -172,25 +184,32 @@ def generate_structured_json(
         "Do NOT include any markdown code blocks, do NOT wrap your response in ```json ... ```, "
         "and do NOT include any preamble or postamble text. Return pure JSON only."
     )
+    if enable_search_grounding:
+        full_system_prompt = (
+            f"{full_system_prompt}\n"
+            "CRITICAL: You MUST respond ONLY with a valid JSON object matching the required shape. "
+            "Do NOT include any preamble or conversational commentary outside of the JSON."
+        )
+    
+    config = types.GenerateContentConfig(
+        system_instruction=full_system_prompt,
+        tools=tools if tools else None,
+        response_mime_type="application/json" if not enable_search_grounding else None
+    )
     
     try:
-        model = genai.GenerativeModel(
-            model_name=settings.GEMINI_MODEL,
-            system_instruction=full_system_prompt,
-            tools=tools if tools else None
-        )
-        
-        # 3. Call generate_content with a strict timeout limit
-        response = model.generate_content(
-            user_prompt,
-            request_options={"timeout": float(settings.GEMINI_TIMEOUT_SECONDS)}
+        # 3. Call generate_content
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=user_prompt,
+            config=config
         )
         
         # 4. Detect Safety Blocks
         if response.candidates:
             candidate = response.candidates[0]
-            finish_reason = getattr(candidate, "finish_reason", 0)
-            if finish_reason == 2 or str(finish_reason) == "SAFETY":
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason == "SAFETY" or finish_reason == 2:
                 raise GeminiServiceError("The response was blocked by safety filters.")
         
         # Extract text content
@@ -216,9 +235,9 @@ def generate_structured_json(
             logger.error(f"JSON parsing failed for raw response:\n{raw_text}")
             raise GeminiParseError(raw_text, f"Failed to parse JSON response: {je}")
             
-    except google_exceptions.DeadlineExceeded as e:
+    except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
         raise GeminiTimeoutError(f"AI service connection timed out: {e}")
-    except (google_exceptions.GoogleAPICallError, google_exceptions.InvalidArgument, Exception) as e:
+    except (APIError, Exception) as e:
         err_msg = str(e)
         if "quota" in err_msg.lower() or "429" in err_msg or "resource_exhausted" in err_msg.lower() or "limit" in err_msg.lower():
             logger.warning(f"Quota limit reached ({err_msg}). Activating robust mock fallback for verification...")
@@ -238,20 +257,20 @@ def generate_structured_json(
                             "category_total": 2500.0,
                             "line_items": [
                                 {
-                                    "item_id": "visa_fee",
-                                    "label": "Visa Fee",
-                                    "amount": 1000.0,
-                                    "frequency": "one_time",
-                                    "notes": "Original fee",
-                                    "source_url": None
+                                     "item_id": "visa_fee",
+                                     "label": "Visa Fee",
+                                     "amount": 1000.0,
+                                     "frequency": "one_time",
+                                     "notes": "Original fee",
+                                     "source_url": None
                                 },
                                 {
-                                    "item_id": "pet_shipping",
-                                    "label": "Pet Shipping",
-                                    "amount": 1500.0,
-                                    "frequency": "one_time",
-                                    "notes": None,
-                                    "source_url": None
+                                     "item_id": "pet_shipping",
+                                     "label": "Pet Shipping",
+                                     "amount": 1500.0,
+                                     "frequency": "one_time",
+                                     "notes": None,
+                                     "source_url": None
                                 }
                             ]
                         }
