@@ -208,9 +208,10 @@ async def list_country_visas(
 
     # Generate if cache miss
     if list_data is None:
-        logger.info(f"Cache MISS for visas list cache key: {cache_key}. Fetching from Gemini...")
+        logger.info(f"Cache MISS or refresh forced for visas list cache key: {cache_key}. Fetching from Gemini...")
         sys_prompt = (
-            f"You are a visa listing assistant for MyFutureAbroad. Search for all major long-stay visa programmes available for {country_name}.\n"
+            f"You are a visa listing assistant for MyFutureAbroad. Use Google Search to query official government databases, embassy portals, and reliable immigration directories to compile a complete, comprehensive, and exhaustive list of all available visa types, options, and programmes for {country_name} (including both short-stay/Schengen visas and long-stay/National visas).\n"
+            "Search thoroughly and do not limit yourself to specific types; return all visa options you find without omitting any.\n"
             "You must return ONLY a valid JSON object matching the detailed schema described below:\n"
             "{\n"
             "  \"visas\": [\n"
@@ -226,7 +227,7 @@ async def list_country_visas(
             "}\n"
             "Never estimate figures. Return pure JSON only."
         )
-        user_prompt = f"Generate the list of major visas for {country_name}."
+        user_prompt = f"Perform a comprehensive Google Search of official government and immigration websites for {country_name} and generate the complete, exhaustive list of all short-stay and long-stay visas."
         
         try:
             list_data = generate_structured_json(sys_prompt, user_prompt, enable_search_grounding=True)
