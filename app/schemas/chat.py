@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
@@ -41,3 +41,19 @@ class SessionHistoryResponse(BaseModel):
     feature: str = Field(description="Feature name.")
     created_at: datetime = Field(description="Session creation timestamp.")
     messages: List[ChatMessageItem] = Field(default_factory=list, description="List of messages in the session.")
+
+
+class ChatbotRequest(BaseModel):
+    session_id: Optional[uuid.UUID] = Field(None, description="UUID of an existing session. If null, a new session is created.")
+    message: str = Field(..., description="The user's latest message.")
+    feature: Literal["chatbot"] = Field("chatbot", description="Must be 'chatbot'.")
+    placement: Optional[str] = Field(None, description="Optional placement identifier.")
+    current_page: Optional[str] = Field(None, description="Optional URL path of the current page.")
+
+
+class ChatbotResponse(BaseModel):
+    session_id: uuid.UUID = Field(description="UUID of the session (new or existing)")
+    message: str = Field(description="Conversational response from the chatbot.")
+    redirect: Optional[str] = Field(None, description="A relative URL path if a redirect is warranted.")
+    sources: List[str] = Field(default_factory=list, description="URLs of any sources used in forming the answer.")
+    request_id: str = Field("", description="Unique request identifier for support/debugging.")

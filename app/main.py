@@ -13,6 +13,7 @@ from app.routers.country_pages import router as country_pages_router
 from app.routers.visa_finder import router as visa_finder_router
 from app.routers.budget import router as budget_router
 from app.routers.checklist import router as checklist_router
+from app.routers.chatbot import router as chatbot_router
 
 
 
@@ -48,6 +49,7 @@ app.include_router(country_pages_router)
 app.include_router(visa_finder_router)
 app.include_router(budget_router)
 app.include_router(checklist_router)
+app.include_router(chatbot_router)
 
 # Middleware to assign unique Request ID to each request
 @app.middleware("http")
