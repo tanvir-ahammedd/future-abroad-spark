@@ -1,4 +1,5 @@
 import time
+import random
 import json
 import logging
 from datetime import datetime, timezone
@@ -182,15 +183,19 @@ def generate_chat_stream(
 def generate_structured_json(
     system_prompt: str,
     user_prompt: str,
-    enable_search_grounding: bool = False
+    enable_search_grounding: bool = False,
+    max_retries: int = 3
 ) -> Dict[str, Any]:
     """
     Calls Gemini to generate a structured non-streaming JSON response.
+    Automatically retries up to max_retries times on transient 503/504 errors
+    with exponential backoff before raising.
     
     Args:
         system_prompt: System-level instruction template.
         user_prompt: User prompt content.
         enable_search_grounding: Whether Google Search grounding should be enabled.
+        max_retries: Maximum number of retry attempts for transient errors (default 3).
         
     Returns:
         dict: The parsed JSON content.
@@ -224,106 +229,140 @@ def generate_structured_json(
         tools=tools if tools else None,
         response_mime_type="application/json" if not enable_search_grounding else None
     )
-    
-    try:
-        # 3. Call generate_content
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=user_prompt,
-            config=config
-        )
-        
-        # 4. Detect Safety Blocks
-        if response.candidates:
-            candidate = response.candidates[0]
-            finish_reason = getattr(candidate, "finish_reason", None)
-            if finish_reason == "SAFETY" or finish_reason == 2:
-                raise GeminiServiceError("The response was blocked by safety filters.")
-        
-        # Extract text content
-        raw_text = response.text
-        if not raw_text:
-            raise GeminiServiceError("AI service returned an empty response.")
-            
-        # 5. Clean up any potential markdown code fences (e.g. ```json ... ```)
-        cleaned_text = raw_text.strip()
-        if cleaned_text.startswith("```"):
-            lines = cleaned_text.split("\n")
-            if lines[0].startswith("```json") or lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            cleaned_text = "\n".join(lines).strip()
-            
-        # 6. Parse JSON content
+
+    last_exception = None
+    for attempt in range(1, max_retries + 1):
         try:
-            parsed_json = json.loads(cleaned_text)
-            return parsed_json
-        except json.JSONDecodeError as je:
-            logger.error(f"JSON parsing failed for raw response:\n{raw_text}")
-            raise GeminiParseError(raw_text, f"Failed to parse JSON response: {je}")
+            # 3. Call generate_content
+            response = client.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents=user_prompt,
+                config=config
+            )
             
-    except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
-        raise GeminiTimeoutError(f"AI service connection timed out: {e}")
-    except (APIError, Exception) as e:
-        err_msg = str(e)
-        if "quota" in err_msg.lower() or "429" in err_msg or "resource_exhausted" in err_msg.lower() or "limit" in err_msg.lower():
-            logger.warning(f"Quota limit reached ({err_msg}). Activating robust mock fallback for verification...")
+            # 4. Detect Safety Blocks
+            if response.candidates:
+                candidate = response.candidates[0]
+                finish_reason = getattr(candidate, "finish_reason", None)
+                if finish_reason == "SAFETY" or finish_reason == 2:
+                    raise GeminiServiceError("The response was blocked by safety filters.")
             
-            # Determine if request is for checklist
-            if "checklist" in system_prompt.lower() or "checklist" in user_prompt.lower():
-                try:
-                    import re
-                    # Look for JSON structure in user_prompt
-                    json_match = re.search(r"\{.*\}", user_prompt, re.DOTALL)
-                    if json_match:
-                        current_checklist = json.loads(json_match.group(0))
-                    else:
-                        current_checklist = {}
-                except:
-                    current_checklist = {}
+            # Extract text content
+            raw_text = response.text
+            if not raw_text:
+                raise GeminiServiceError("AI service returned an empty response.")
                 
-                if "phases" in current_checklist and current_checklist["phases"]:
-                    phase = current_checklist["phases"][0]
-                    # Make sure we don't duplicate mock_added_item
-                    existing_item_ids = [item.get("item_id") for item in phase.get("items", [])]
-                    if "mock_added_item" not in existing_item_ids:
-                        new_item = {
-                            "item_id": "mock_added_item",
-                            "title": "Mock Added Item",
-                            "description": "This is a mock added checklist item for testing.",
-                            "status": "not_started",
-                            "category": "personal",
-                            "country_specific": False,
-                            "notes": "Added via mock update."
-                        }
-                        phase["items"].append(new_item)
-                    return current_checklist
-                else:
-                    return {
-                        "destination_country": "Spain",
-                        "move_date_reference": "September 2026",
-                        "phases": [
-                            {
-                                "phase_id": "six_months_before",
-                                "phase_label": "6 Months Before",
-                                "items": [
-                                    {
-                                        "item_id": "apply_for_visa",
-                                        "title": "Apply for Spain Visa",
-                                        "description": "Prepare and submit your visa application documents.",
-                                        "status": "not_started",
-                                        "category": "documents",
-                                        "country_specific": True,
-                                        "notes": "Ensure all documents are translated and apostilled."
-                                    }
-                                ]
-                            }
-                        ]
-                    }
+            # 5. Clean up any potential markdown code fences (e.g. ```json ... ```)
+            cleaned_text = raw_text.strip()
+            if cleaned_text.startswith("```"):
+                lines = cleaned_text.split("\n")
+                if lines[0].startswith("```json") or lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                cleaned_text = "\n".join(lines).strip()
+                
+            # 6. Parse JSON content
+            try:
+                parsed_json = json.loads(cleaned_text)
+                return parsed_json
+            except json.JSONDecodeError as je:
+                logger.error(f"JSON parsing failed for raw response:\n{raw_text}")
+                raise GeminiParseError(raw_text, f"Failed to parse JSON response: {je}")
+
+        except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
+            raise GeminiTimeoutError(f"AI service connection timed out: {e}")
+
+        except (GeminiServiceError, GeminiParseError, GeminiTimeoutError):
+            # Do not retry on our own typed exceptions unless they are transient 503/504
+            raise
+
+        except Exception as e:
+            err_msg = str(e)
+            is_transient = (
+                "503" in err_msg or "unavailable" in err_msg.lower() or
+                "504" in err_msg or "deadline_exceeded" in err_msg.lower() or
+                "deadline exceeded" in err_msg.lower()
+            )
+            if is_transient and attempt < max_retries:
+                # Exponential backoff with jitter: 2s, 4s, 8s …
+                delay = (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(
+                    f"Transient Gemini error on attempt {attempt}/{max_retries} "
+                    f"({err_msg[:120]}). Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+                last_exception = e
+                continue
+            # Non-transient or final attempt — fall through to outer handler
+            last_exception = e
+            break
+
+    # All retries exhausted — delegate to the quota/error handler below
+    e = last_exception
+    err_msg = str(e) if e else ""
+    try:
+        raise e
+    except Exception:
+        pass
             
-            # Determine if request is for budget (Phase 7)
-            elif "budget" in system_prompt.lower() or "budget" in user_prompt.lower():
+    # --- Post-retry error handling ---
+    if "quota" in err_msg.lower() or "429" in err_msg or "resource_exhausted" in err_msg.lower() or "limit" in err_msg.lower():
+        logger.warning(f"Quota limit reached ({err_msg}). Activating robust mock fallback for verification...")
+        
+        # Determine if request is for checklist
+        if "checklist" in system_prompt.lower() or "checklist" in user_prompt.lower():
+            try:
+                import re
+                # Look for JSON structure in user_prompt
+                json_match = re.search(r"\{.*\}", user_prompt, re.DOTALL)
+                if json_match:
+                    current_checklist = json.loads(json_match.group(0))
+                else:
+                    current_checklist = {}
+            except:
+                current_checklist = {}
+                
+            if "phases" in current_checklist and current_checklist["phases"]:
+                phase = current_checklist["phases"][0]
+                # Make sure we don't duplicate mock_added_item
+                existing_item_ids = [item.get("item_id") for item in phase.get("items", [])]
+                if "mock_added_item" not in existing_item_ids:
+                    new_item = {
+                        "item_id": "mock_added_item",
+                        "title": "Mock Added Item",
+                        "description": "This is a mock added checklist item for testing.",
+                        "status": "not_started",
+                        "category": "personal",
+                        "country_specific": False,
+                        "notes": "Added via mock update."
+                    }
+                    phase["items"].append(new_item)
+                return current_checklist
+            else:
+                return {
+                        "destination_country": "Spain",
+                    "move_date_reference": "September 2026",
+                    "phases": [
+                        {
+                            "phase_id": "six_months_before",
+                            "phase_label": "6 Months Before",
+                            "items": [
+                                {
+                                    "item_id": "apply_for_visa",
+                                    "title": "Apply for Spain Visa",
+                                    "description": "Prepare and submit your visa application documents.",
+                                    "status": "not_started",
+                                    "category": "documents",
+                                    "country_specific": True,
+                                    "notes": "Ensure all documents are translated and apostilled."
+                                }
+                            ]
+                        }
+                    ]
+                }
+        # Determine if request is for budget
+        elif "budget" in system_prompt.lower() or "budget" in user_prompt.lower():
                 return {
                     "destination_country": "Portugal",
                     "visa_type": "D7 Passive Income",
@@ -356,8 +395,8 @@ def generate_structured_json(
                         }
                     ]
                 }
-            # Determine if request is for country listing
-            elif "countries" in system_prompt.lower() or "expat destination countries" in system_prompt.lower():
+        # Determine if request is for country listing
+        elif "countries" in system_prompt.lower() or "expat destination countries" in system_prompt.lower():
                 return {
                     "countries": [
                         {
@@ -380,9 +419,8 @@ def generate_structured_json(
                         }
                     ]
                 }
-            
-            # Determine if request is for visas listing
-            elif "visas" in system_prompt.lower() or "visa programme" in system_prompt.lower():
+        # Determine if request is for visas listing
+        elif "visas" in system_prompt.lower() or "visa programme" in system_prompt.lower():
                 return {
                     "visas": [
                         {
@@ -395,9 +433,8 @@ def generate_structured_json(
                         }
                     ]
                 }
-            
-            # Otherwise, assume individual country profile details
-            else:
+        # Otherwise, assume individual country profile details
+        else:
                 return {
                     "country": "Portugal",
                     "country_code": "PT",
@@ -436,6 +473,6 @@ def generate_structured_json(
                     "data_confidence": "full",
                     "generated_at": datetime.now(timezone.utc).isoformat()
                 }
-        if isinstance(e, (GeminiTimeoutError, GeminiServiceError)):
-            raise e
-        raise GeminiServiceError(f"AI service failed with API error: {e}")
+    if isinstance(e, (GeminiTimeoutError, GeminiServiceError)):
+        raise e
+    raise GeminiServiceError(f"AI service failed with API error: {e}")
